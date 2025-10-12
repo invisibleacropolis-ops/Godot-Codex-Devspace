@@ -1,0 +1,117 @@
+[gd_scene load_steps=10 format=3 uid="uid://dv6u8fgen6p5k"]
+
+[sub_resource type="StandardMaterial3D" id="StandardMaterial3D_ebc12"]
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_ebc12"]
+emission_shape = 1
+emission_sphere_radius = 3.0
+direction = Vector3(0, 0, 0)
+spread = 180.0
+initial_velocity_min = 0.5
+initial_velocity_max = 1.5
+angular_velocity_min = -30.0
+angular_velocity_max = 30.0
+orbit_velocity_min = 0.2
+orbit_velocity_max = 0.5
+radial_accel_min = 0.1
+radial_accel_max = 0.3
+scale_min = 0.3
+scale_max = 0.8
+color = Color(0.9, 0.95, 1, 1)
+
+[sub_resource type="SphereMesh" id="SphereMesh_ebc12"]
+radius = 0.1
+height = 0.2
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_yvh8t"]
+emission_shape = 1
+emission_sphere_radius = 4.0
+direction = Vector3(0, 0, 0)
+spread = 180.0
+initial_velocity_min = 0.3
+initial_velocity_max = 1.0
+angular_velocity_min = -20.0
+angular_velocity_max = 20.0
+orbit_velocity_min = 0.15
+orbit_velocity_max = 0.4
+scale_min = 0.5
+scale_max = 1.5
+color = Color(1, 0.2, 0.6, 0.8)
+
+[sub_resource type="SphereMesh" id="SphereMesh_yvh8t"]
+radius = 0.15
+height = 0.3
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_2k0gq"]
+emission_shape = 1
+emission_sphere_radius = 4.5
+direction = Vector3(0, 0, 0)
+spread = 180.0
+initial_velocity_min = 0.4
+initial_velocity_max = 1.2
+angular_velocity_min = -25.0
+angular_velocity_max = 25.0
+orbit_velocity_min = 0.2
+orbit_velocity_max = 0.45
+scale_min = 0.4
+scale_max = 1.2
+color = Color(1, 0.5, 0.1, 0.9)
+
+[sub_resource type="SphereMesh" id="SphereMesh_2k0gq"]
+radius = 0.12
+height = 0.25
+
+[sub_resource type="ParticleProcessMaterial" id="ParticleProcessMaterial_3wkgj"]
+emission_shape = 1
+emission_sphere_radius = 8.0
+direction = Vector3(0, 0, 0)
+spread = 180.0
+initial_velocity_min = 0.1
+initial_velocity_max = 0.3
+scale_min = 0.05
+scale_max = 0.2
+hue_variation_min = -0.2
+hue_variation_max = 0.2
+
+[sub_resource type="SphereMesh" id="SphereMesh_3wkgj"]
+radius = 0.05
+height = 0.1
+
+[node name="Node3D" type="Node3D"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.044794917, 0, 0)
+
+[node name="Camera3D" type="Camera3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.8253356, 0.5646425, 0, -0.5646425, 0.8253356, 0, 8, 12)
+
+[node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]
+transform = Transform3D(0.9553365, -0.14167994, 0.2593434, 0, 0.87758255, 0.47942555, -0.29552022, -0.45801273, 0.83838665, 0, 0, 0)
+
+[node name="GalaxyCore" type="Node3D" parent="."]
+
+[node name="SpiralArms" type="GPUParticles3D" parent="GalaxyCore"]
+material_override = SubResource("StandardMaterial3D_ebc12")
+amount = 400
+lifetime = 5.0
+process_material = SubResource("ParticleProcessMaterial_ebc12")
+draw_pass_1 = SubResource("SphereMesh_ebc12")
+
+[node name="PinkNebula" type="GPUParticles3D" parent="GalaxyCore"]
+amount = 200
+lifetime = 6.0
+visibility_aabb = AABB(-12, -12, -12, 24, 24, 24)
+process_material = SubResource("ParticleProcessMaterial_yvh8t")
+draw_pass_1 = SubResource("SphereMesh_yvh8t")
+
+[node name="OrangeNebula" type="GPUParticles3D" parent="GalaxyCore"]
+amount = 180
+lifetime = 7.0
+visibility_aabb = AABB(-12, -12, -12, 24, 24, 24)
+process_material = SubResource("ParticleProcessMaterial_2k0gq")
+draw_pass_1 = SubResource("SphereMesh_2k0gq")
+
+[node name="TwinklingStars" type="GPUParticles3D" parent="GalaxyCore"]
+amount = 300
+lifetime = 4.0
+visibility_aabb = AABB(-15, -15, -15, 30, 30, 30)
+process_material = SubResource("ParticleProcessMaterial_3wkgj")
+draw_pass_1 = SubResource("SphereMesh_3wkgj")
