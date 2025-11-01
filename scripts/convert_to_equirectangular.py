@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-Utility for projecting standard perspective images into an equirectangular panorama.
+Utility for projecting standard perspective images or re-sampling existing equirectangular
+panoramas into a normalized lat/long texture.
 
-The script assumes the input image is a pinhole camera capture with a known horizontal
-field-of-view. By default it assumes a 90-degree horizontal FOV and computes the vertical
-FOV from the source aspect ratio, but both values can be overridden via CLI flags.
+When the source is a pinhole camera capture the horizontal field-of-view must be provided
+(defaults to 90 degrees) and the vertical FOV is inferred from the aspect ratio unless
+explicitly overridden. For panoramic sources the script can automatically detect common
+2:1 equirectangular images and re-map them while honoring yaw/pitch/roll offsets.
 
-Pixels outside the source camera frustum are filled with a configurable background
+Pixels outside a perspective camera frustum are filled with a configurable background
 color and the resulting panorama spans 360 degrees horizontally and 180 degrees vertically.
 """
 
@@ -74,10 +76,17 @@ def parse_color(value: str | None, channels: int) -> np.ndarray:
     return np.array(components, dtype=np.float32)
 
 
-def bilinear_sample(src: np.ndarray, u: np.ndarray, v: np.ndarray) -> np.ndarray:
+def bilinear_sample(
+    src: np.ndarray,
+    u: np.ndarray,
+    v: np.ndarray,
+    wrap_u: bool = False,
+) -> np.ndarray:
     """Sample `src` at floating point coordinates (u, v) using bilinear interpolation."""
     h, w = src.shape[:2]
 
+    if wrap_u:
+        u = np.mod(u, w)
     u_clipped = np.clip(u, 0, w - 1)
     v_clipped = np.clip(v, 0, h - 1)
 
@@ -109,9 +118,10 @@ def project_to_equirectangular(
     pitch_deg: float,
     roll_deg: float,
     fill_color: str | None,
+    input_projection: str = "auto",
     return_metadata: bool = False,
 ) -> Image.Image | Tuple[Image.Image, Dict[str, Any]]:
-    """Project a perspective image onto an equirectangular panorama."""
+    """Project image data onto an equirectangular panorama."""
     if image.mode not in ("RGB", "RGBA", "L"):
         image = image.convert("RGBA")
 
@@ -120,13 +130,21 @@ def project_to_equirectangular(
         src = src[..., None]
 
     src_h, src_w = src.shape[:2]
+    if src_h == 0 or src_w == 0:
+        raise ValueError("Input image must have non-zero dimensions.")
 
+    projection_mode = input_projection.lower()
+    if projection_mode not in {"auto", "perspective", "equirectangular"}:
+        raise ValueError(f"Unknown projection type: {input_projection}")
+    if projection_mode == "auto":
+        aspect = src_w / src_h
+        projection_mode = "equirectangular" if abs(aspect - 2.0) <= 0.1 else "perspective"
+
+    hfov_rad = math.radians(hfov_deg)
     if vfov_deg is None:
-        hfov_rad = math.radians(hfov_deg)
         vfov_rad = 2.0 * math.atan(math.tan(hfov_rad / 2.0) * (src_h / src_w))
     else:
         vfov_rad = math.radians(vfov_deg)
-        hfov_rad = math.radians(hfov_deg)
 
     rotation = rotation_matrix(
         math.radians(yaw_deg), math.radians(pitch_deg), math.radians(roll_deg)
@@ -145,45 +163,54 @@ def project_to_equirectangular(
     )
     dirs_cam = dirs_world @ world_to_cam
 
-    z = dirs_cam[..., 2]
-    x = dirs_cam[..., 0]
-    y = dirs_cam[..., 1]
-
-    # Only keep directions projected in front of the camera
-    front_mask = z > 1e-6
-
-    horizontal = np.arctan2(x, z)
-    vertical = np.arctan2(y, np.sqrt(x * x + z * z))
-
-    h_limit = hfov_rad / 2.0
-    v_limit = vfov_rad / 2.0
-
-    within_fov = (np.abs(horizontal) <= h_limit) & (np.abs(vertical) <= v_limit) & front_mask
-
-    output = np.empty((height, width, src.shape[2]), dtype=np.float32)
-    fill = parse_color(fill_color, src.shape[2])
-    output[:] = fill
     metadata: Dict[str, Any] | None = None
 
-    if not np.any(within_fov):
-        result_img = Image.fromarray(np.clip(output, 0, 255).astype(np.uint8))
-        if return_metadata:
-            metadata = {
-                "lon_grid": lon_grid,
-                "lat_grid": lat_grid,
-                "mask": within_fov,
-                "hfov_rad": hfov_rad,
-                "vfov_rad": vfov_rad,
-                "fill_color": fill,
-            }
-            return result_img, metadata
-        return result_img
+    if projection_mode == "equirectangular":
+        lon_src = np.arctan2(dirs_cam[..., 0], dirs_cam[..., 2])
+        lat_src = np.arcsin(np.clip(dirs_cam[..., 1], -1.0, 1.0))
 
-    u = ((horizontal / h_limit) + 1.0) * 0.5 * (src_w - 1)
-    v = ((vertical / v_limit) + 1.0) * 0.5 * (src_h - 1)
+        u = ((lon_src + math.pi) % (2.0 * math.pi)) / (2.0 * math.pi) * (src_w - 1)
+        v = ((math.pi / 2.0 - lat_src) / math.pi) * (src_h - 1)
 
-    sampled = bilinear_sample(src, u, v)
-    output[within_fov] = sampled[within_fov]
+        sampled = bilinear_sample(src, u, v, wrap_u=True)
+        output = sampled
+        mask = np.ones((height, width), dtype=bool)
+        effective_hfov = 2.0 * math.pi
+        effective_vfov = math.pi
+        fill_vec = np.zeros((src.shape[2],), dtype=np.float32)
+    else:
+        z = dirs_cam[..., 2]
+        x = dirs_cam[..., 0]
+        y = dirs_cam[..., 1]
+
+        front_mask = z > 1e-6
+
+        denom = np.where(np.abs(z) < 1e-6, np.sign(z) * 1e-6, z)
+        x_norm = x / denom
+        y_norm = y / denom
+
+        h_limit = max(math.tan(hfov_rad / 2.0), 1e-6)
+        v_limit = max(math.tan(vfov_rad / 2.0), 1e-6)
+
+        within_fov = (
+            (np.abs(x_norm) <= h_limit)
+            & (np.abs(y_norm) <= v_limit)
+            & front_mask
+        )
+
+        output = np.empty((height, width, src.shape[2]), dtype=np.float32)
+        fill_vec = parse_color(fill_color, src.shape[2])
+        output[:] = fill_vec
+
+        if np.any(within_fov):
+            u = ((x_norm / h_limit) + 1.0) * 0.5 * (src_w - 1)
+            v = ((y_norm / v_limit) + 1.0) * 0.5 * (src_h - 1)
+            sampled = bilinear_sample(src, u, v)
+            output[within_fov] = sampled[within_fov]
+
+        mask = within_fov
+        effective_hfov = hfov_rad
+        effective_vfov = vfov_rad
 
     if image.mode == "L":
         output = output[..., 0]
@@ -196,10 +223,11 @@ def project_to_equirectangular(
         metadata = {
             "lon_grid": lon_grid,
             "lat_grid": lat_grid,
-            "mask": within_fov,
-            "hfov_rad": hfov_rad,
-            "vfov_rad": vfov_rad,
-            "fill_color": fill,
+            "mask": mask,
+            "hfov_rad": effective_hfov,
+            "vfov_rad": effective_vfov,
+            "fill_color": fill_vec,
+            "projection_mode": projection_mode,
         }
         return result_img, metadata
     return result_img
@@ -382,6 +410,7 @@ def convert_image_file(
     pitch_deg: float,
     roll_deg: float,
     fill_color: str | None,
+    input_projection: str = "auto",
     quality: int | None = None,
     auto_fill_poles: bool = True,
     polar_blur_kernel: int = 3,
@@ -399,6 +428,7 @@ def convert_image_file(
             pitch_deg=pitch_deg,
             roll_deg=roll_deg,
             fill_color=fill_color,
+            input_projection=input_projection,
             return_metadata=auto_fill_poles,
         )
 
@@ -408,7 +438,13 @@ def convert_image_file(
             converted_img = projection  # type: ignore[assignment]
             metadata = None
 
-        if auto_fill_poles and metadata is not None:
+        apply_polar_fill = (
+            auto_fill_poles
+            and metadata is not None
+            and metadata.get("projection_mode") == "perspective"
+            and not np.all(metadata["mask"])
+        )
+        if apply_polar_fill:
             converted_array = np.array(converted_img, dtype=np.float32)
             filled_array = fill_poles_with_polar(
                 panorama=converted_array if converted_array.ndim == 3 else converted_array[..., None],
@@ -495,6 +531,16 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Horizontal field-of-view of the input camera in degrees (default: 90).",
     )
     parser.add_argument(
+        "--input-projection",
+        choices=["auto", "perspective", "equirectangular"],
+        default="auto",
+        help=(
+            "Projection model of the input imagery. "
+            "'auto' infers from the aspect ratio, 'perspective' treats the source as a rectilinear photo, "
+            "and 'equirectangular' assumes a full lat/long panorama."
+        ),
+    )
+    parser.add_argument(
         "--vfov",
         type=float,
         help="Vertical field-of-view of the input camera in degrees. Defaults to auto computed.",
@@ -555,6 +601,7 @@ def launch_gui() -> None:
     output_var = tk.StringVar()
     size_choice = tk.StringVar(value="4K (4096 x 2048)")
     quality_choice = tk.StringVar(value="High (95)")
+    projection_var = tk.StringVar(value="auto")
     hfov_var = tk.DoubleVar(value=90.0)
     yaw_var = tk.DoubleVar(value=0.0)
     pitch_var = tk.DoubleVar(value=0.0)
@@ -624,13 +671,14 @@ def launch_gui() -> None:
                 vfov_deg=None,
                 yaw_deg=yaw_var.get(),
                 pitch_deg=pitch_var.get(),
-                roll_deg=roll_var.get(),
-                fill_color=None,
-                quality=quality,
-                auto_fill_poles=polar_fill_var.get(),
-                polar_blur_kernel=polar_blur_var.get(),
-                polar_noise_std=polar_noise_var.get(),
-            )
+            roll_deg=roll_var.get(),
+            fill_color=None,
+            input_projection=projection_var.get(),
+            quality=quality,
+            auto_fill_poles=polar_fill_var.get(),
+            polar_blur_kernel=polar_blur_var.get(),
+            polar_noise_std=polar_noise_var.get(),
+        )
         except Exception as exc:  # pylint: disable=broad-exception-caught
             messagebox.showerror("Conversion failed", str(exc))
             return
@@ -653,7 +701,12 @@ def launch_gui() -> None:
     tk.Label(root, text="JPEG quality").grid(row=3, column=0, sticky="w", **padding)
     tk.OptionMenu(root, quality_choice, *QUALITY_PRESETS.keys()).grid(row=3, column=1, sticky="ew", **padding)
 
-    tk.Label(root, text="Horizontal FOV (deg)").grid(row=4, column=0, sticky="w", **padding)
+    tk.Label(root, text="Input projection").grid(row=4, column=0, sticky="w", **padding)
+    tk.OptionMenu(root, projection_var, "auto", "perspective", "equirectangular").grid(
+        row=4, column=1, sticky="ew", **padding
+    )
+
+    tk.Label(root, text="Horizontal FOV (deg)").grid(row=5, column=0, sticky="w", **padding)
     tk.Scale(
         root,
         variable=hfov_var,
@@ -662,11 +715,11 @@ def launch_gui() -> None:
         resolution=1.0,
         orient="horizontal",
         length=220,
-    ).grid(row=4, column=1, columnspan=2, sticky="ew", **padding)
+    ).grid(row=5, column=1, columnspan=2, sticky="ew", **padding)
 
-    tk.Label(root, text="Yaw / Pitch / Roll (deg)").grid(row=5, column=0, sticky="w", **padding)
+    tk.Label(root, text="Yaw / Pitch / Roll (deg)").grid(row=6, column=0, sticky="w", **padding)
     orientation_frame = tk.Frame(root)
-    orientation_frame.grid(row=5, column=1, columnspan=2, sticky="ew", **padding)
+    orientation_frame.grid(row=6, column=1, columnspan=2, sticky="ew", **padding)
     tk.Scale(
         orientation_frame,
         label="Yaw",
@@ -698,7 +751,7 @@ def launch_gui() -> None:
         length=160,
     ).grid(row=0, column=2)
 
-    tk.Label(root, text="Polar blur kernel (px)").grid(row=6, column=0, sticky="w", **padding)
+    tk.Label(root, text="Polar blur kernel (px)").grid(row=7, column=0, sticky="w", **padding)
     tk.Scale(
         root,
         variable=polar_blur_var,
@@ -707,9 +760,9 @@ def launch_gui() -> None:
         resolution=1,
         orient="horizontal",
         length=220,
-    ).grid(row=6, column=1, columnspan=2, sticky="ew", **padding)
+    ).grid(row=7, column=1, columnspan=2, sticky="ew", **padding)
 
-    tk.Label(root, text="Polar noise std (0-255)").grid(row=7, column=0, sticky="w", **padding)
+    tk.Label(root, text="Polar noise std (0-255)").grid(row=8, column=0, sticky="w", **padding)
     tk.Scale(
         root,
         variable=polar_noise_var,
@@ -718,15 +771,15 @@ def launch_gui() -> None:
         resolution=0.5,
         orient="horizontal",
         length=220,
-    ).grid(row=7, column=1, columnspan=2, sticky="ew", **padding)
+    ).grid(row=8, column=1, columnspan=2, sticky="ew", **padding)
 
     tk.Checkbutton(
         root,
         text="Fill poles using polar coordinate extrapolation",
         variable=polar_fill_var,
-    ).grid(row=8, column=0, columnspan=3, sticky="w", padx=10, pady=(4, 0))
+    ).grid(row=9, column=0, columnspan=3, sticky="w", padx=10, pady=(4, 0))
 
-    tk.Button(root, text="Convert", command=run_conversion).grid(row=9, column=0, columnspan=3, pady=12)
+    tk.Button(root, text="Convert", command=run_conversion).grid(row=10, column=0, columnspan=3, pady=12)
 
     root.mainloop()
 
@@ -765,6 +818,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             pitch_deg=args.pitch,
             roll_deg=args.roll,
             fill_color=args.fill_color,
+            input_projection=args.input_projection,
             quality=quality,
             auto_fill_poles=not args.disable_polar_fill,
             polar_blur_kernel=args.polar_blur_kernel,
